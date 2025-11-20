@@ -45,6 +45,56 @@ def flat_polar_plot(polarDirections, polarError, title_suffix="Right Ear", clim=
     plt.show()
 
 
+def flat_polar_multiplot(polarDirections, polarError, band_index=0,
+                    title_suffix="Right Ear", clim=(0, 20), ax=None, show_colorbar=False):
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 3))
+
+    InputData = polarDirections
+
+    # Convert polar angles to radians
+    azimuths = (InputData[:, 0] - 180) * np.pi / 180
+    elevations = InputData[:, 1] * np.pi / 180
+
+    # Spherical to Cartesian
+    x = np.cos(elevations) * np.cos(azimuths)
+    y = np.cos(elevations) * np.sin(azimuths)
+    z = np.sin(elevations)
+
+    # Select one Bark band
+    intensity = polarError[:, band_index]
+
+    # Create sphere grid
+    phi = np.linspace(0, 2 * np.pi, 101)
+    theta = np.linspace(0, np.pi, 101)
+    phi, theta = np.meshgrid(phi, theta)
+
+    aa = np.sin(theta) * np.cos(phi)
+    bb = np.sin(theta) * np.sin(phi)
+    cc = np.cos(theta)
+
+    # Interpolation
+    v = griddata((x, y, z), intensity, (aa, bb, cc), method='nearest')
+    v = np.nan_to_num(v, nan=0)
+
+    # Plot
+    im = ax.imshow(v, cmap='jet', origin='lower', aspect='auto')
+    ax.set_title(f'{title_suffix} – Bark {band_index+1}', fontsize=8)
+
+    ax.set_xticks(np.linspace(0, 100, 36))
+    ax.set_xticklabels(np.arange(0, 360, 10), rotation=90, fontsize=6)
+    ax.set_yticks(np.linspace(0, 100, 19))
+    ax.set_yticklabels(np.arange(-90, 100, 10), fontsize=6)
+
+    ax.set_xlabel('Azimuth')
+    ax.set_ylabel('Elevation')
+    im.set_clim(*clim)
+
+    if show_colorbar:
+        plt.colorbar(im, ax=ax, orientation='vertical', fraction=0.03, pad=0.02)
+
+    return im
 
 
 
@@ -66,4 +116,27 @@ if __name__ == "__main__":
     # flat_polar_plot(polarDirections, polarError, title_suffix="Left Ear")
     # flat_polar_plot(polarDirections, polarError, clim=(5, 25))
     # flat_polar_plot(polarDirections, polarError, title_suffix="Custom", clim=(10, 30))
+
+if __name__ == "__main__" and False:
+    fig, axes = plt.subplots(4, 6, figsize=(18, 10))
+    axes = axes.flatten()
+
+    for i in range(24):
+        flat_polar_multiplot(
+            polarDirections,
+            snr_values, 
+            band_index=i,
+            title_suffix="Left Ear",
+            clim=(0, 60),
+            ax=axes[i],
+            show_colorbar=False
+        )
+
+    # Optional: add one shared colorbar
+    # cbar = fig.colorbar(axes[0].images[0], ax=axes, orientation='vertical', fraction=0.02)
+    # cbar = fig.colorbar(axes[0].images[0], ax=axes, location="right", shrink=0.9, pad=0.02)
+    # plt.tight_layout(rect=[0, 0, 0.95, 1])
+    cbar = fig.colorbar(axes[0].images[0], ax=axes, location="bottom", orientation="horizontal", fraction=0.04, pad=0.05)
+    cbar.set_label('Signal-to-Noise Ratio (dB)')
+    plt.show()
 
