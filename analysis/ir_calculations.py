@@ -41,3 +41,49 @@ def calculate_impulse_response(sweep, recorded, fs, f1, f2):
     IR = np.real(IR)
     
     return IR
+
+
+def deconv(recorded, inverse):
+    """
+    Compute the impulse response by FFT deconvolution:
+        IR = IFFT( FFT(recorded) * FFT(inverse) )
+
+    Parameters
+    ----------
+    recorded : ndarray, shape (channels, samples)
+        Recorded sweep response (your microphone recording).
+    inverse : ndarray, shape (samples,)
+        Inverse filter (already padded to match sweep length).
+
+    Returns
+    -------
+    ir : ndarray, shape (channels, samples + inverse_samples - 1)
+        The impulse responses for each channel.
+    """
+
+    # Ensure 2D shape: (channels, samples)
+    recorded = np.atleast_2d(recorded)
+
+    num_channels, len_recorded = recorded.shape
+    len_inverse = len(inverse)
+
+    # Convolution length
+    N = len_recorded + len_inverse - 1
+
+    # Precompute FFT of inverse filter
+    fft_inverse = np.fft.fft(inverse, N)
+
+    # Output IR array
+    impulse_responses = np.zeros((num_channels, N))
+
+    # Process each channel
+    for ch in range(num_channels):
+        fft_rec = np.fft.fft(recorded[ch], N)
+        ir = np.fft.ifft(fft_rec * fft_inverse)
+        impulse_responses[ch] = np.real(ir)
+
+    return impulse_responses
+
+
+
+
