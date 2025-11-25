@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 # ------------------------- parameters from my setup -------------------------
-ELEVATIONS = np.array([ 90.        , 83.77752   , 68.09975   , 59.49227   , 52.68235   , 46.80371,
+ELEVATIONS = np.array([ 88.        , 80.       , 68.09975   , 59.49227   , 52.68235   , 46.80371,
                         41.5091    , 36.61715   , 32.01837   , 27.64017   , 23.43094   , 19.35192,
                         15.37263   , 11.46806    , 7.616845   , 3.8        , 0.        , -3.8,
                         -7.61684   , -11.4681   , -15.3726   , -19.3519   , -23.4309   , -27.6402,
@@ -16,13 +16,21 @@ AZ_STEP = 5.0    # degrees -> 72 azimuths
 
 # ------------------------- basic conversions --------------------------------
 
-def sph_from_elev_az(elev_deg, az_deg):
-    theta = np.deg2rad(90.0 - np.asarray(elev_deg))
-    phi = np.deg2rad(np.asarray(az_deg))
+def acoustic_to_spherical_coordinate(elev_deg, az_deg):
+    theta = 90.0 - np.asarray(elev_deg)
+    phi = np.asarray(az_deg)
     return theta, phi
 
+# def acoustic_to_spherical_coordinate(elev_deg, az_deg):
+#     theta = np.deg2rad(90.0 - np.asarray(elev_deg))
+#     phi = np.deg2rad(np.asarray(az_deg))
+#     return theta, phi
+
 def unit_cartesian_from_elev_az(elev_deg, az_deg):
-    theta, phi = sph_from_elev_az(elev_deg, az_deg)
+    theta, phi = acoustic_to_spherical_coordinate(elev_deg, az_deg)
+    theta = np.deg2rad(theta)
+    phi = np.deg2rad(phi)
+
     x = np.sin(theta) * np.cos(phi)
     y = np.sin(theta) * np.sin(phi)
     z = np.cos(theta)
@@ -31,6 +39,47 @@ def unit_cartesian_from_elev_az(elev_deg, az_deg):
 def angular_distance_matrix(u):
     D = np.clip(np.dot(u, u.T), -1.0, 1.0)
     return np.rad2deg(np.arccos(D))
+
+# ------------------------- helper functions   -------------------------------
+
+def circular_distance(a, b):
+    d = np.abs(a - b)
+    return np.minimum(d, 360 - d)
+
+def subsample_azimuths(azimuths, min_sep, keep_ref=True):
+    """
+    Subsample azimuth angles with minimum circular separation.
+    Always keeps 0/90/180/270 if keep_ref=True and present.
+
+    azimuths : array of azimuths in degrees
+    min_sep  : minimum angular separation in degrees
+    """
+    azimuths = np.sort(azimuths)
+    selected = []
+
+    # Always preserve main cardinal directions if present
+    ref_angles = [0, 90, 180, 270] if keep_ref else []
+
+    for ref in ref_angles:
+        idx = np.argmin(circular_distance(azimuths, ref))
+        if circular_distance(azimuths[idx], ref) < 1e-3:
+            selected.append(azimuths[idx])
+
+    # Greedy selection on rest
+    for az in azimuths:
+        if any(circular_distance(az, s) < min_sep for s in selected):
+            continue
+        selected.append(az)
+
+    # Guarantee minimum of 4 points
+    if len(selected) < 4:
+        remaining = [az for az in azimuths if az not in selected]
+        while len(selected) < 4 and remaining:
+            selected.append(remaining.pop(0))
+
+    return np.array(sorted(set(selected)))
+
+
 
 # ------------------------- candidate builder --------------------------------
 
@@ -81,6 +130,38 @@ def greedy_angular_exclusion(candidates, alpha_deg=12.0, preserve_poles=True):
         selected.append(i)
     return selected
 
+def elevation_dependent_subsampling(directions, elevations, az_thresholds):
+    """
+    directions: Nx3 array [elev, az, r]
+    elevations: unique sorted elevation values
+    az_thresholds: per-elevation azimuth resolution
+    """
+    directions = np.asarray(directions)
+    elevations = np.asarray(elevations)
+    az_thresholds = np.asarray(az_thresholds).flatten()
+    if directions.ndim == 1:
+        directions = np.vstack(directions)
+    
+    selected_indices = []
+    for i, elev in enumerate(elevations):
+        mask = np.isclose(directions[:,0], elev)
+        subset = directions[mask]
+        azimuths = subset[:,1]
+        az_sel = subsample_azimuths(azimuths, az_thresholds[i])
+        # Keep only directions matching selected azimuths
+        for az in az_sel:
+            idx = np.where(mask & np.isclose(directions[:,1], az))[0]
+            if len(idx) > 0:
+                selected_indices.append(idx[0])
+    
+    # Sort indices to maintain original order from directions array
+    selected_indices = np.array(selected_indices)
+    selected_indices.sort()
+    
+    return selected_indices
+
+
+
 def farthest_first(candidates, K=500, seed_index=0):
     units = np.vstack([c['unit'] for c in candidates])
     N = units.shape[0]
@@ -94,6 +175,54 @@ def farthest_first(candidates, K=500, seed_index=0):
                 selected.append(int(idx))
                 break
     return selected
+
+
+from scipy.spatial import cKDTree
+
+def subsample_by_distance(candidates, min_dist):
+    """
+    Selects a subset of candidate positions such that the Euclidean distance
+    between any two selected positions is greater than or equal to min_dist.
+    This uses a greedy approach and a k-d tree for efficient neighbor finding.
+
+    Args:
+        candidates (list): List of dictionaries, each containing a 'pos' key
+                           with the 3D Cartesian coordinates [x, y, z].
+        min_dist (float): The minimum allowable Euclidean distance between
+                          any two selected points (in the same units as 'pos').
+
+    Returns:
+        list: A list of integer indices corresponding to the selected candidates.
+    """
+
+    positions = np.vstack([c['pos'] for c in candidates])
+    N = len(positions)
+
+    tree = cKDTree(positions)
+
+    # Initialize a boolean array indicating which candidates are available for selection
+    keep = np.ones(N, dtype=bool)
+    selected_indices = []
+
+    for i in range(N):
+        # Skip points already excluded by a previous selection
+        if not keep[i]:
+            continue
+
+        selected_indices.append(i)
+
+        # Find all points within the exclusion radius 'min_dist'
+        neighbors = tree.query_ball_point(positions[i], min_dist)
+
+        # Remove the selected point itself from the neighbors list
+        if i in neighbors:
+            neighbors.remove(i)
+
+        # Exclude all close neighbors from future selection
+        keep[neighbors] = False
+
+    return selected_indices
+
 
 def sh_design_matrix(candidates, L):
     units = np.vstack([c['unit'] for c in candidates])
@@ -196,21 +325,47 @@ if __name__=="__main__":
     candidates = build_candidate_grid(ELEVATIONS, az_step_deg=5.0)
 
     # 2. Greedy selection
-    selected_greedy = greedy_angular_exclusion(candidates, alpha_deg=12.0)
-    plot_candidates_and_selection(candidates, selected_greedy, title="Greedy Angular Exclusion")
+    # selected_greedy = greedy_angular_exclusion(candidates, alpha_deg=12.0)
+    # plot_candidates_and_selection(candidates, selected_greedy, title="Greedy Angular Exclusion")
+
+    # AZ_THRESH = np.asarray([7., 6., 5., 4., 3., 2., 1., 1., 1., 1., 1., 1.,
+    #                     1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.,
+    #                     1., 1., 2., 3., 4., 5., 6., 7.])
+    A = 1         # Minimum value at center
+    max_val = 90  # Maximum threshold at edges
+    mu = 0        # Center at elevation 0
+    sigma = 70    # Spread (adjust for sharpness)
+
+    gauss_vals = A * np.exp(-(ELEVATIONS - mu)**2 / (2 * sigma**2))
+    AZ_THRESH = max_val - (max_val-A) * gauss_vals
+
+    # Convert candidates to Nx3 array [elev, az, r]
+    directions = np.array([[c['elev'], c['az'], RADIUS] for c in candidates])
+
+    selected_ed = elevation_dependent_subsampling(
+        directions=directions, elevations=ELEVATIONS,
+        az_thresholds=AZ_THRESH)
+    print("AZ_THRESH: ", AZ_THRESH)
+    print(f"The Original Directions: {directions.shape}, the subsampled directions: {selected_ed.shape}")
+    plot_candidates_and_selection(candidates, selected_ed, title="Elevation Dependent")
+    plt.plot(ELEVATIONS,AZ_THRESH)
+    plt.show()
 
     # 3. Farthest-first
-    selected_ff = farthest_first(candidates, K=500)
-    plot_candidates_and_selection(candidates, selected_ff, title="Farthest-First")
+    # selected_ff = farthest_first(candidates, K=1200)
+    # plot_candidates_and_selection(candidates, selected_ff, title="Farthest-First")
 
-    # 4. SH-based selection
-    selected_sh, elev_chosen = sh_based_selection(ELEVATIONS, candidates, L_target=16)
-    plot_candidates_and_selection(candidates, selected_sh, title="SH-based Elevation Selection")
+    # # 4. SH-based selection
+    # selected_sh, elev_chosen = sh_based_selection(ELEVATIONS, candidates, L_target=16)
+    # plot_candidates_and_selection(candidates, selected_sh, title="SH-based Elevation Selection")
+
+    # selected_by_euclidean = subsample_by_distance(candidates, min_dist=50.0)
+    # plot_candidates_and_selection(candidates, selected_by_euclidean, title="Euclidean distance")
 
     # 5. Optional: diagnostics
-    stats = selection_pairwise_stats(candidates, selected_greedy)
-    cond = sh_conditioning(candidates, selected_greedy, L=16)
-    print(stats, cond['cond'])
+    # stats = selection_pairwise_stats(candidates, selected_greedy)
+    # cond = sh_conditioning(candidates, selected_greedy, L=16)
+    # print(stats, cond['cond'])
 
 
 
