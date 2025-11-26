@@ -87,6 +87,50 @@ def get_hrtf_from_directions(
 
 
 
+def match_directions(
+    measured_directions,
+    target_directions,
+    tolerance=1e-3,
+    metric="max"):
+    """
+    Returns indices in measured_directions that best match target_directions.
+
+    Parameters
+    ----------
+    measured_directions : (N, 3) array
+    target_directions   : (M, 3) array
+    tolerance           : float, max acceptable error
+    metric              : "euclidean" or "max"
+    for max: max(|Δaz|, |Δel|, |Δr|) < tolerance
+
+    Returns
+    -------
+    matched_indices : (K,) array
+        Indices into measured_directions
+    mask : (M,) boolean array
+        True for target directions that were matched
+    """
+
+    measured = measured_directions[:, None, :]  # (N,1,3)
+    target   = target_directions[None, :, :]    # (1,M,3)
+
+    diff = np.abs(measured - target)            # (N,M,3)
+
+    if metric == "euclidean":
+        dist = np.linalg.norm(diff, axis=2)     # (N,M)
+    elif metric == "max":
+        dist = np.max(diff, axis=2)             # (N,M)
+    else:
+        raise ValueError("metric must be 'euclidean' or 'max'")
+
+    best_match_idx = np.argmin(dist, axis=0)    # For each target
+    best_match_err = dist[best_match_idx, np.arange(dist.shape[1])]
+
+    mask = best_match_err <= tolerance
+
+    return best_match_idx[mask], mask
+
+
 
 
 
